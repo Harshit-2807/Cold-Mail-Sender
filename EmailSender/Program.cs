@@ -8,28 +8,21 @@ namespace EmailSender
 {
     public static class Program
     {
-        private static IConfiguration? _config;
-        private static SmtpClient? _smtpClient;
+        private static readonly IConfiguration Config = BuildConfiguration();
+        private static readonly SmtpClient SmtpClient = CreateSmtpClient();
         private static int _errorCount;
+        private static readonly Dictionary<string, string> MailTemplates = LoadMailTemplates();
 
-        private static IConfiguration Config
+        private static IConfiguration BuildConfiguration()
         {
-            get
-            {
-                _config ??= BuildConfiguration();
-                return _config;
-            }
+            var projectRoot = Directory.GetParent(AppContext.BaseDirectory).Parent.Parent.Parent.FullName;
+            var builder = new ConfigurationBuilder();
+            builder.SetBasePath(projectRoot);
+            builder.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
+            builder.AddJsonFile("appsettings.Development.json", optional: true, reloadOnChange: true);
+            return builder.Build();
         }
-
-        private static SmtpClient SmtpClient
-        {
-            get
-            {
-                _smtpClient ??= CreateSmtpClient();
-                return _smtpClient;
-            }
-        }
-
+        
         private static SmtpClient CreateSmtpClient()
         {
             var host = Config["Smtp:Host"];
@@ -44,6 +37,18 @@ namespace EmailSender
             };
         }
 
+        private static Dictionary<string, string> LoadMailTemplates()
+        {
+            var mailTemplates = Directory.GetFiles(Config["FilePaths:Resources"], "*.html");
+            return mailTemplates.ToDictionary(
+                Path.GetFileNameWithoutExtension,
+                filePath =>
+                {
+                    var body = File.ReadAllText(filePath);
+                    return Regex.Replace(body, @"[\r\n\t]+", string.Empty);
+                });
+        }
+
         private static readonly JsonSerializerOptions SerializerOptions = new() { WriteIndented = true };
 
         private static readonly Attachment Resume = new(Config["FilePaths:Resume"]);
@@ -51,31 +56,36 @@ namespace EmailSender
         public static void Main(string[] args)
         {
             var masterFilePath = Config["FilePaths:MasterCsv"];
-            var mailTemplateFilepath = Config["FilePaths:MailTemplate"];
-            var sentMailList = Config["FilePaths:SentMailList"];
+            var mailTemplateFileName = Config["FilePaths:MailTemplate"];
+            var sentMailFilePath = Config["FilePaths:SentMailList"];
 
-            if (!File.Exists(masterFilePath) || !File.Exists(mailTemplateFilepath))
+            if (!File.Exists(masterFilePath) || !MailTemplates.ContainsKey(mailTemplateFileName))
             {
                 Console.WriteLine("File not found");
                 Environment.Exit(1);
             }
 
             Dictionary<string, DateTime> sentMap;
-            if (File.Exists(sentMailList))
+            if (File.Exists(sentMailFilePath))
             {
-                var json = File.ReadAllText(sentMailList);
+                var json = File.ReadAllText(sentMailFilePath);
                 sentMap = JsonSerializer.Deserialize<Dictionary<string, DateTime>>(json) ?? [];
             }
             else
                 sentMap = [];
 
-            var body = File.ReadAllText(mailTemplateFilepath);
-            body = Regex.Replace(body, @"[\r\n\t]+", string.Empty);
+            var body = MailTemplates[mailTemplateFileName];
             IList<IList<string>> masterData = [];
+            int nameIndex = 0, emailIndex = 2, organizationIndex = 1;
             try
             {
                 var sr = new StreamReader(masterFilePath);
-                sr.ReadLine();
+                var headers = sr.ReadLine().Split(',');
+                nameIndex = Array.IndexOf(headers, "Name");
+                emailIndex = Array.IndexOf(headers, "Email");
+                organizationIndex = Array.IndexOf(headers, "Organization");
+                if (nameIndex == -1 || emailIndex == -1 || organizationIndex == -1)
+                    throw new Exception("All headers not present in the CSV file");
                 while (!sr.EndOfStream)
                 {
                     string line = sr.ReadLine();
@@ -93,38 +103,34 @@ namespace EmailSender
             int sentMailCount = 0;
             foreach (var row in masterData)
             {
-                var name = row[0];
-                var email = row[2];
+                var name = row[nameIndex];
+                var email = row[emailIndex];
+                if (sentMap.ContainsKey(email)) continue;
+                var organization = row[organizationIndex].Split(' ')[0];
+
+                var newBody = body;
+                if (MailTemplates.TryGetValue(organization, out var value))
+                    newBody = value;
 
                 var firstName = name.Split(' ')[0];
-                var newBody = body.Replace("{{name}}", firstName);
+                newBody = newBody.Replace("{{name}}", firstName);
 
                 if (_errorCount > 5) break;
-                
-                if (sentMap.ContainsKey(email) || !TrySendMail(newBody, email, name)) continue;
-                
+
+                if (!TrySendMail(newBody, email, name)) continue;
+
                 sentMap.Add(email, DateTime.Now);
                 sentMailCount++;
                 if (sentMailCount == Convert.ToInt32(Config["Mail:DailyLimit"])) break;
             }
 
-            File.WriteAllText(sentMailList, JsonSerializer.Serialize(sentMap, SerializerOptions));
+            File.WriteAllText(sentMailFilePath, JsonSerializer.Serialize(sentMap, SerializerOptions));
 
             Console.WriteLine(_errorCount < 5 ? "Mail sent successfully" : "Limit Exceeded, stopped sending mails.");
 
             var failed = masterData.Count - sentMap.Count;
             if (failed > 0)
                 Console.WriteLine($"Failed to send {failed} mails");
-        }
-
-        private static IConfiguration BuildConfiguration()
-        {
-            var projectRoot = Directory.GetParent(AppContext.BaseDirectory).Parent.Parent.Parent.FullName;
-            var builder = new ConfigurationBuilder();
-            builder.SetBasePath(projectRoot);
-            builder.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
-            builder.AddJsonFile("appsettings.Development.json", optional: true, reloadOnChange: true);
-            return builder.Build();
         }
 
         private static bool TrySendMail(string body, string toEmailAddress, string name)
