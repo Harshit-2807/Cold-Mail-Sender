@@ -46,7 +46,8 @@ namespace EmailSender
                 {
                     var body = File.ReadAllText(filePath);
                     return Regex.Replace(body, @"[\r\n\t]+", string.Empty);
-                });
+                },
+                StringComparer.OrdinalIgnoreCase);
         }
 
         private static readonly JsonSerializerOptions SerializerOptions = new() { WriteIndented = true };
