@@ -101,7 +101,7 @@ namespace EmailSender
                 Environment.Exit(1);
             }
 
-            int sentMailCount = 0;
+            var sentMailCount = sentMap.Count(entry => entry.Value.Date == DateTime.Today);
             foreach (var row in masterData)
             {
                 var name = row[nameIndex];
