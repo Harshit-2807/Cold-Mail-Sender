@@ -11,6 +11,7 @@ namespace EmailSender
         private static readonly IConfiguration Config = BuildConfiguration();
         private static readonly SmtpClient SmtpClient = CreateSmtpClient();
         private static int _errorCount;
+        private static string resourcePath;
         private static readonly Dictionary<string, string> MailTemplates = LoadMailTemplates();
 
         private static IConfiguration BuildConfiguration()
@@ -39,7 +40,8 @@ namespace EmailSender
 
         private static Dictionary<string, string> LoadMailTemplates()
         {
-            var mailTemplates = Directory.GetFiles(Config["FilePaths:Resources"], "*.html");
+            resourcePath = Config["FilePaths:Resources"] ?? "../../../../resources/";
+            var mailTemplates = Directory.GetFiles(resourcePath, "*.html");
             return mailTemplates.ToDictionary(
                 Path.GetFileNameWithoutExtension,
                 filePath =>
@@ -77,7 +79,7 @@ namespace EmailSender
 
             var body = MailTemplates[mailTemplateFileName];
             IList<IList<string>> masterData = [];
-            int nameIndex = 0, emailIndex = 2, organizationIndex = 1;
+            int nameIndex = 0, emailIndex = 2, organizationIndex = 1, subjectIndex = 3, attachmentIndex = 4;
             try
             {
                 var sr = new StreamReader(masterFilePath);
@@ -85,6 +87,8 @@ namespace EmailSender
                 nameIndex = Array.IndexOf(headers, "Name");
                 emailIndex = Array.IndexOf(headers, "Email");
                 organizationIndex = Array.IndexOf(headers, "Organization");
+                subjectIndex = Array.IndexOf(headers, "Subject");
+                attachmentIndex = Array.IndexOf(headers, "Attachment");
                 if (nameIndex == -1 || emailIndex == -1 || organizationIndex == -1)
                     throw new Exception("All headers not present in the CSV file");
                 while (!sr.EndOfStream)
@@ -101,14 +105,16 @@ namespace EmailSender
                 Environment.Exit(1);
             }
 
-            var sentMailCount = sentMap.Count(entry => entry.Value.Date == DateTime.Today);
+            var sentMailCount = sentMap.Count(static entry => entry.Value.Date == DateTime.Today);
             foreach (var row in masterData)
             {
                 var name = row[nameIndex];
                 var email = row[emailIndex];
                 if (sentMap.ContainsKey(email)) continue;
                 var organization = row[organizationIndex].Split(' ')[0];
-
+                var subject = subjectIndex != -1 && !string.IsNullOrEmpty(row[subjectIndex]) ? row[subjectIndex] : Config["Mail:Subject"];
+                var attachmentPath = attachmentIndex != -1 && !string.IsNullOrEmpty(row[attachmentIndex]) ? Path.Combine(resourcePath, row[attachmentIndex]) : null;
+                
                 var newBody = body;
                 if (MailTemplates.TryGetValue(organization, out var value))
                     newBody = value;
@@ -118,7 +124,7 @@ namespace EmailSender
 
                 if (_errorCount > 5) break;
 
-                if (!TrySendMail(newBody, email, name)) continue;
+                if (!TrySendMail(subject, newBody, email, name, attachmentPath)) continue;
 
                 sentMap.Add(email, DateTime.Now);
                 sentMailCount++;
@@ -134,17 +140,21 @@ namespace EmailSender
                 Console.WriteLine($"Failed to send {failed} mails");
         }
 
-        private static bool TrySendMail(string body, string toEmailAddress, string name)
+        private static bool TrySendMail(string subject, string body, string toEmailAddress, string name, string? attachmentPath = null)
         {
             try
             {
                 var mailMessage = new MailMessage();
                 mailMessage.From = new MailAddress(Config["Smtp:Username"], Config["Mail:SenderName"]);
                 mailMessage.To.Add(new MailAddress(toEmailAddress, name));
-                mailMessage.Subject = Config["Mail:Subject"];
+                mailMessage.Subject = subject;
                 mailMessage.Body = body;
                 mailMessage.IsBodyHtml = true;
                 mailMessage.Attachments.Add(Resume);
+
+                if (attachmentPath != null && File.Exists(attachmentPath))
+                        mailMessage.Attachments.Add(new Attachment(attachmentPath));
+                
                 SmtpClient.Send(mailMessage);
 
                 Console.WriteLine($"Mail sent to {toEmailAddress}");
